@@ -1,0 +1,15 @@
+build/
+install/
+log/
+
+**/__pycache__/
+**/*.pyc
+**/*.pyo
+**/*.egg-info/
+
+src/nanoowl/build/
+src/torch2trt/build/
+
+src/nanoowl/data/*.onnx
+src/nanoowl/data/*.engine
+src/ROS2-NanoOWL/data/*.engine
