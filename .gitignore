@@ -12,4 +12,8 @@ src/torch2trt/build/
 
 src/nanoowl/data/*.onnx
 src/nanoowl/data/*.engine
+src/nanoowl/data/*.timing
 src/ROS2-NanoOWL/data/*.engine
+src/ROS2-NanoOWL/data/*.timing
+
+my_model/

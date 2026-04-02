@@ -26,13 +26,18 @@ def generate_launch_description():
             description='Threshold for filtering detections'),
         DeclareLaunchArgument(
             'image_encoder_engine',
-            default_value='src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine',
+            default_value='/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine',
             description='Path to the TensorRT engine for the OWL-ViT vision encoder'),
+        DeclareLaunchArgument(
+            'model',
+            default_value='/workspaces/isaac_ros-dev/my_model',
+            description='Path to the Hugging Face OWL-ViT model directory'),
     ]
 
     # NanoOWL parameters
     thresholds = LaunchConfiguration('thresholds')
     image_encoder_engine = LaunchConfiguration('image_encoder_engine')
+    model = LaunchConfiguration('model')
 
     cam2image_node = Node(
             package='image_tools',
@@ -44,7 +49,7 @@ def generate_launch_description():
             package='ros2_nanoowl',
             executable='nano_owl_py',
             parameters=[{
-                'model': 'google/owlvit-base-patch32',
+                'model': model,
                 'image_encoder_engine': image_encoder_engine,
                 'thresholds':thresholds,
             }]

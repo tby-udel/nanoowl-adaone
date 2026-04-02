@@ -20,6 +20,7 @@ import PIL.Image
 import subprocess
 import tempfile
 import os
+import json
 from torchvision.ops import roi_align
 from transformers.models.owlvit.modeling_owlvit import OwlViTForObjectDetection
 from transformers.models.owlvit.processing_owlvit import OwlViTProcessor
@@ -50,6 +51,10 @@ def _owl_center_to_corners_format_torch(bboxes_center):
 
 
 def _owl_get_image_size(hf_name: str):
+    if os.path.isdir(hf_name):
+        with open(os.path.join(hf_name, "config.json"), "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg["vision_config"]["image_size"]
 
     image_sizes = {
         "google/owlvit-base-patch32": 768,
@@ -61,6 +66,10 @@ def _owl_get_image_size(hf_name: str):
 
 
 def _owl_get_patch_size(hf_name: str):
+    if os.path.isdir(hf_name):
+        with open(os.path.join(hf_name, "config.json"), "r", encoding="utf-8") as f:
+            cfg = json.load(f)
+        return cfg["vision_config"]["patch_size"]
 
     patch_sizes = {
         "google/owlvit-base-patch32": 32,
@@ -165,7 +174,7 @@ class OwlPredictor(torch.nn.Module):
 
         self.text_device = torch.device("cpu") if self.use_trt_image_encoder else self.device
         self.model = self.model.to(self.text_device)
-        self.processor = OwlViTProcessor.from_pretrained(model_name)
+        self.processor = OwlViTProcessor.from_pretrained(model_name, use_fast=False)
         self.patch_size = _owl_get_patch_size(model_name)
         self.num_patches_per_side = self.image_size // self.patch_size
         self.box_bias = None

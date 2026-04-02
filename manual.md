@@ -1,8 +1,32 @@
 # ROS2-NanoOWL Manual
 
-This is the day-to-day runbook for the working setup in `/home/ada2/boyang_ws`.
+This is the current day-to-day runbook for the custom-model setup in `/home/ada2/boyang_ws`.
 
-## 1. Start The Container
+Everything in this file assumes NanoOWL is now using:
+
+- model directory: `/workspaces/isaac_ros-dev/my_model`
+- TensorRT engine: `/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
+
+The old `google/owlvit-base-patch32` commands are intentionally not repeated here.
+
+## 1. Required Files
+
+These files should exist before launching:
+
+- host model directory: `/home/ada2/boyang_ws/my_model`
+- host engine file: `/home/ada2/boyang_ws/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
+- host backup engine copy: `/home/ada2/boyang_ws/src/nanoowl/data/my_model_image_encoder.engine`
+
+Quick check:
+
+```bash
+ls -lh \
+  /home/ada2/boyang_ws/my_model \
+  /home/ada2/boyang_ws/src/ROS2-NanoOWL/data/my_model_image_encoder.engine \
+  /home/ada2/boyang_ws/src/nanoowl/data/my_model_image_encoder.engine
+```
+
+## 2. Start The Container
 
 If the saved container already exists:
 
@@ -10,7 +34,7 @@ If the saved container already exists:
 docker start isaac_ros_dev-aarch64-container
 ```
 
-If you need to recreate it from the saved working image:
+If you need to recreate it from the saved image:
 
 ```bash
 docker run -d \
@@ -41,11 +65,29 @@ Optional shell:
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash
 ```
 
-## 2. Sample-Image Smoke Test
+## 3. Verify The Runtime Before Launch
 
-Use this before the camera if you want a quick install check.
+This confirms the container sees the workspace, the custom model, and the custom engine:
 
-Terminal 1:
+```bash
+docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
+printenv ISAAC_ROS_WS &&
+ls -lh /workspaces/isaac_ros-dev/my_model &&
+ls -lh /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine
+'
+```
+
+Expected highlights:
+
+- `ISAAC_ROS_WS=/workspaces/isaac_ros-dev`
+- `model.safetensors` is present in `/workspaces/isaac_ros-dev/my_model`
+- `my_model_image_encoder.engine` exists in `src/ROS2-NanoOWL/data`
+
+## 4. Sample-Image Smoke Test With The Custom Model
+
+Use this before the camera if you want a quick end-to-end sanity check.
+
+Terminal 1, publish the sample image:
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -55,17 +97,23 @@ ros2 run image_publisher image_publisher_node /workspaces/isaac_ros-dev/src/nano
 '
 ```
 
-Terminal 2:
+Terminal 2, launch NanoOWL with the custom model and engine:
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
 source /opt/ros/humble/setup.bash &&
 source /workspaces/isaac_ros-dev/install/setup.bash &&
-ros2 launch ros2_nanoowl nano_owl_example.launch.py thresholds:=0.1 image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=0 &&
+ros2 run ros2_nanoowl nano_owl_py --ros-args \
+  -p model:=/workspaces/isaac_ros-dev/my_model \
+  -p device:=cuda \
+  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine \
+  -p thresholds:=0.05 \
+  -p publish_output_image:=true
 '
 ```
 
-Terminal 3:
+Terminal 3, publish a query that matches the sample image:
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -75,7 +123,7 @@ ros2 topic pub -1 /input_query std_msgs/msg/String "data: an owl, a glove"
 '
 ```
 
-Terminal 4:
+Terminal 4, verify one detection message:
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -85,9 +133,16 @@ ros2 topic echo /output_detections --once
 '
 ```
 
-## 3. Live Camera Startup
+Known good result from this workspace:
 
-Start the RealSense node on the host first. Keep these environment variables the same on both host and container.
+- sample-image inference with `my_model` returned `labels [0, 1]`
+- sample-image inference with the custom TensorRT engine returned `num_boxes 2`
+
+## 5. Live Camera Startup
+
+Start the RealSense node on the host first.
+
+Use the same ROS DDS settings on both host and container:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -98,11 +153,11 @@ ros2 run realsense2_camera realsense2_camera_node --ros-args -p enable_depth:=fa
 
 Success sign:
 
-- The terminal prints `RealSense Node Is Up!`
+- the terminal prints `RealSense Node Is Up!`
 
-## 4. Fast GPU Detection Mode
+## 6. Fast GPU Detection Mode With The Custom Model
 
-Use this when you want the highest throughput and do not need the annotated image topic.
+Use this when you want detections only and do not need the annotated image topic.
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -111,25 +166,23 @@ source /workspaces/isaac_ros-dev/install/setup.bash &&
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=0 &&
 ros2 run ros2_nanoowl nano_owl_py --ros-args \
   -r input_image:=/camera/camera/color/image_raw \
+  -p model:=/workspaces/isaac_ros-dev/my_model \
   -p device:=cuda \
-  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine \
+  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine \
   -p thresholds:=0.05 \
   -p publish_output_image:=false
 '
 ```
 
-Observed result on this machine:
-
-- about `10 Hz` on `/output_detections`
-
 Important:
 
-- `publish_output_image:=false` means `/output_image` will not publish frames for RViz.
-- This is the preferred mode when you only care about detections.
+- `publish_output_image:=false` means `/output_image` will not publish frames.
+- this is the preferred mode for throughput
+- accuracy depends on what prompts your fine-tuned model was trained to handle
 
-## 5. Visualization GPU Mode
+## 7. Visualization GPU Mode With The Custom Model
 
-Use this when you want to see the annotated camera image in RViz.
+Use this when you want annotated frames for RViz or Foxglove.
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -138,24 +191,20 @@ source /workspaces/isaac_ros-dev/install/setup.bash &&
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=0 &&
 ros2 run ros2_nanoowl nano_owl_py --ros-args \
   -r input_image:=/camera/camera/color/image_raw \
+  -p model:=/workspaces/isaac_ros-dev/my_model \
   -p device:=cuda \
-  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine \
+  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine \
   -p thresholds:=0.05 \
   -p publish_output_image:=true
 '
 ```
 
-Observed result on this machine:
-
-- about `7 Hz` on `/output_image`
-- about `8.4 Hz` on `/output_detections`
-
 Important:
 
-- Use either fast mode or visualization mode, not both at once.
-- The correct RViz topic is `/output_image`.
+- use either fast mode or visualization mode, not both at once
+- the correct visualization topic is `/output_image`
 
-## 6. Publish The Query
+## 8. Publish A Query
 
 From the host:
 
@@ -166,7 +215,12 @@ export ROS_LOCALHOST_ONLY=0
 ros2 topic pub -1 /input_query std_msgs/msg/String "data: a person, a monitor, a chair"
 ```
 
-## 7. Check Detections
+Model note:
+
+- for best results, use prompts close to the classes or phrases your fine-tuned model saw during training
+- `an owl, a glove` is only the smoke-test prompt for the bundled sample image
+
+## 9. Check Detections
 
 Container-side watch:
 
@@ -203,12 +257,12 @@ ros2 topic hz /output_detections
 
 Host-side note:
 
-- `ros2 topic echo /output_detections` on the host needs `vision_msgs` installed in the host ROS environment.
-- If that package is missing, use the container commands above.
+- `ros2 topic echo /output_detections` on the host requires `vision_msgs` in the host ROS installation
+- if that package is missing on the host, use the container-side commands above
 
-## 8. Visualize In RViz
+## 10. Visualize In RViz
 
-Start RViz from the host:
+Start RViz on the host:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -219,11 +273,11 @@ rviz2
 
 Inside RViz:
 
-- Add an `Image` display.
-- Set Topic to `/output_image`.
-- If the view stays blank, set Reliability Policy to `Reliable`.
+- add an `Image` display
+- set Topic to `/output_image`
+- if the view is blank, set Reliability Policy to `Reliable`
 
-Quick one-shot topic check from the host:
+Quick one-shot image check:
 
 ```bash
 source /opt/ros/humble/setup.bash
@@ -232,7 +286,67 @@ export ROS_LOCALHOST_ONLY=0
 ros2 topic echo /output_image --once
 ```
 
-## 9. Useful Checks
+## 11. Rebuild The Custom TensorRT Engine If Needed
+
+This is the exact command sequence that finally succeeded on this Jetson.
+
+Important prerequisites:
+
+- reboot the Jetson first
+- do not start RealSense, RViz, NanoOWL, or other GPU-heavy tasks before running it
+- run it early after boot while memory is still clean
+
+```bash
+docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
+set -e
+source /opt/ros/humble/setup.bash
+cd /workspaces/isaac_ros-dev/src/nanoowl
+rm -f data/my_model_image_encoder_opset17.onnx data/my_model_image_encoder.engine data/patch32_orin.timing
+python3 - <<'"'"'PY'"'"'
+from nanoowl.owl_predictor import OwlPredictor
+predictor = OwlPredictor(model_name="/workspaces/isaac_ros-dev/my_model", device="cpu")
+predictor.export_image_encoder_onnx("data/my_model_image_encoder_opset17.onnx", onnx_opset=17)
+print("onnx17_export_ok")
+PY
+/usr/src/tensorrt/bin/trtexec \
+  --onnx=data/my_model_image_encoder_opset17.onnx \
+  --saveEngine=data/my_model_image_encoder.engine \
+  --fp16 \
+  --shapes=image:1x3x768x768 \
+  --builderOptimizationLevel=0 \
+  --maxAuxStreams=0 \
+  --tacticSources=-CUDNN,-EDGE_MASK_CONVOLUTIONS,-JIT_CONVOLUTIONS \
+  --timingCacheFile=data/patch32_orin.timing \
+  --skipInference
+cp -f data/my_model_image_encoder.engine /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine
+ls -lh data/my_model_image_encoder.engine /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine data/patch32_orin.timing
+'
+```
+
+What this does:
+
+- exports the custom model to ONNX with opset `17`
+- builds the TensorRT engine with a low-memory builder configuration
+- writes a timing cache to `src/nanoowl/data/patch32_orin.timing`
+- copies the finished engine to the ROS package data directory
+
+Successful output highlights from this workspace:
+
+- engine generation completed in about `41.5 seconds`
+- engine size was about `173 MiB`
+- timing cache size was about `351 KiB`
+
+## 12. If The Engine File Is Missing
+
+The ROS node now falls back to direct model inference instead of crashing if the engine path does not exist.
+
+That fallback is useful for debugging, but it is not the preferred runtime on this Jetson:
+
+- direct CPU mode works but is slower
+- direct GPU mode without TensorRT was unstable under memory pressure
+- the custom TensorRT engine is the intended deployment path
+
+## 13. Useful Checks
 
 Confirm camera topics on the host:
 
@@ -243,7 +357,7 @@ export ROS_LOCALHOST_ONLY=0
 ros2 topic list | grep '^/camera/'
 ```
 
-Confirm container nodes:
+Confirm NanoOWL is in the ROS graph:
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -254,7 +368,18 @@ ros2 node list
 '
 ```
 
-Confirm NanoOWL is publishing:
+Confirm output topics exist:
+
+```bash
+docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
+source /opt/ros/humble/setup.bash &&
+source /workspaces/isaac_ros-dev/install/setup.bash &&
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=0 &&
+ros2 topic list | grep -E "^/output_detections$|^/output_image$|^/input_query$"
+'
+```
+
+Confirm `output_detections` publisher state:
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -265,23 +390,7 @@ ros2 topic info /output_detections -v
 '
 ```
 
-## 10. Query Index Mapping
-
-`class_id` in `/output_detections` is the index of the phrase in your query.
-
-Example query:
-
-```text
-a person, a monitor, a chair
-```
-
-Mapping:
-
-- `0` = `a person`
-- `1` = `a monitor`
-- `2` = `a chair`
-
-## 11. Shutdown
+## 14. Shutdown
 
 Stop the host camera:
 

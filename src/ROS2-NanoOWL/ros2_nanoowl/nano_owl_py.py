@@ -21,6 +21,7 @@ from vision_msgs.msg import Detection2D, Detection2DArray, ObjectHypothesisWithP
 from cv_bridge import CvBridge
 import cv2
 import numpy as np
+import os
 from PIL import Image as im
 from nanoowl.owl_predictor import (OwlPredictor)
 from nanoowl.owl_drawing import (draw_owl_output)
@@ -30,9 +31,9 @@ class Nano_OWL_Subscriber(Node):
     def __init__(self):
         super().__init__('nano_owl_subscriber')
         
-        self.declare_parameter('model', 'google/owlvit-base-patch32')
+        self.declare_parameter('model', '/workspaces/isaac_ros-dev/my_model')
         self.declare_parameter('device', 'cuda')
-        self.declare_parameter('image_encoder_engine', '../data/owl_image_encoder_patch32.engine')
+        self.declare_parameter('image_encoder_engine', '/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine')
         self.declare_parameter('thresholds', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('publish_output_image', False)
 
@@ -67,8 +68,12 @@ class Nano_OWL_Subscriber(Node):
         predictor_kwargs = {
             'device': self.device,
         }
-        if self.device == 'cuda' and self.image_encoder_engine:
+        if self.device == 'cuda' and self.image_encoder_engine and os.path.exists(self.image_encoder_engine):
             predictor_kwargs['image_encoder_engine'] = self.image_encoder_engine
+        elif self.device == 'cuda' and self.image_encoder_engine:
+            self.get_logger().warning(
+                f'TensorRT engine not found at {self.image_encoder_engine}; falling back to direct model inference.'
+            )
 
         self.predictor = OwlPredictor(
          self.model,
