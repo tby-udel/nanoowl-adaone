@@ -36,6 +36,9 @@ class Nano_OWL_Subscriber(Node):
         self.declare_parameter('image_encoder_engine', '/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine')
         self.declare_parameter('thresholds', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('publish_output_image', False)
+        self.declare_parameter('publish_legacy_outputs', False)
+        self.declare_parameter('legacy_detection_topic', '/yolo/detections')
+        self.declare_parameter('legacy_image_topic', '/yolo/inference_image')
 
         # Subscriber for input query
         self.query_subscription = self.create_subscription(
@@ -63,6 +66,11 @@ class Nano_OWL_Subscriber(Node):
         self.device = self.get_parameter('device').get_parameter_value().string_value
         self.image_encoder_engine = self.get_parameter('image_encoder_engine').get_parameter_value().string_value
         self.publish_output_image = self.get_parameter('publish_output_image').get_parameter_value().bool_value
+        self.publish_legacy_outputs = self.get_parameter('publish_legacy_outputs').get_parameter_value().bool_value
+        self.legacy_detection_topic = self.get_parameter('legacy_detection_topic').get_parameter_value().string_value
+        self.legacy_image_topic = self.get_parameter('legacy_image_topic').get_parameter_value().string_value
+        self.legacy_detection_publisher = self.create_publisher(String, self.legacy_detection_topic, 10)
+        self.legacy_image_publisher = self.create_publisher(Image, self.legacy_image_topic, 10)
         self.processing_image = False
 
         predictor_kwargs = {
@@ -126,10 +134,12 @@ class Nano_OWL_Subscriber(Node):
             detections_arr.header = data.header
 
             num_detections = len(output.labels)
+            legacy_detections = []
 
             for i in range(num_detections):
                 box = output.boxes[i]
                 label_index = int(output.labels[i])
+                score = float(output.scores[i])
                 box = [float(x) for x in box]
                 top_left = (box[0], box[1])
                 bottom_right = (box[2], box[3])
@@ -140,11 +150,22 @@ class Nano_OWL_Subscriber(Node):
                 obj.bbox.center.position.y = (box[1] + box[3]) / 2.0
                 hyp = ObjectHypothesisWithPose()
                 hyp.hypothesis.class_id = str(label_index)
+                hyp.hypothesis.score = score
                 obj.results.append(hyp)
                 obj.header = data.header
                 detections_arr.detections.append(obj)
+                if 0 <= label_index < len(self.query_text):
+                    class_name = self.query_text[label_index]
+                else:
+                    class_name = str(label_index)
+                legacy_detections.append(
+                    f'{class_name} [{box[0]:.1f}, {box[1]:.1f}, {box[2]:.1f}, {box[3]:.1f}] ({score:.2f})'
+                )
 
             self.output_publisher.publish(detections_arr)
+            if self.publish_legacy_outputs:
+                legacy_message = '; '.join(legacy_detections) if legacy_detections else 'no detections'
+                self.legacy_detection_publisher.publish(String(data=legacy_message))
 
             if self.publish_output_image:
                 image = draw_owl_output(PIL_img, output, text=text, draw_text=True)
@@ -152,8 +173,11 @@ class Nano_OWL_Subscriber(Node):
                 image = np.array(image)
                 # convert RGB to BGR
                 image = image[:, :, ::-1].copy()
-
-                self.output_image_publisher.publish(self.cv_br.cv2_to_imgmsg(image, "bgr8"))
+                image_msg = self.cv_br.cv2_to_imgmsg(image, "bgr8")
+                image_msg.header = data.header
+                self.output_image_publisher.publish(image_msg)
+                if self.publish_legacy_outputs:
+                    self.legacy_image_publisher.publish(image_msg)
         finally:
             self.processing_image = False
 
