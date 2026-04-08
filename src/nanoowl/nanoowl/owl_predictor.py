@@ -214,25 +214,34 @@ class OwlPredictor(torch.nn.Module):
         return OwlEncodeTextOutput(text_embeds=text_embeds)
 
     def encode_image_torch(self, image: torch.Tensor) -> OwlEncodeImageOutput:
-        
-        vision_outputs = self.model.owlvit.vision_model(image)
-        last_hidden_state = vision_outputs[0]
-        image_embeds = self.model.owlvit.vision_model.post_layernorm(last_hidden_state)
-        class_token_out = image_embeds[:, :1, :]
-        image_embeds = image_embeds[:, 1:, :] * class_token_out
-        image_embeds = self.model.layer_norm(image_embeds)  # 768 dim
+        amp_enabled = self.device.type == "cuda"
 
-        # Box Head
-        pred_boxes = self.model.box_head(image_embeds)
-        pred_boxes += self.box_bias
-        pred_boxes = torch.sigmoid(pred_boxes)
-        pred_boxes = _owl_center_to_corners_format_torch(pred_boxes)
+        with torch.autocast(device_type="cuda", dtype=torch.float16, enabled=amp_enabled):
+            vision_outputs = self.model.owlvit.vision_model(image)
+            last_hidden_state = vision_outputs[0]
+            image_embeds = self.model.owlvit.vision_model.post_layernorm(last_hidden_state)
+            class_token_out = image_embeds[:, :1, :]
+            image_embeds = image_embeds[:, 1:, :] * class_token_out
+            image_embeds = self.model.layer_norm(image_embeds)  # 768 dim
 
-        # Class Head
-        image_class_embeds = self.model.class_head.dense0(image_embeds)
-        logit_shift = self.model.class_head.logit_shift(image_embeds)
-        logit_scale = self.model.class_head.logit_scale(image_embeds)
-        logit_scale = self.model.class_head.elu(logit_scale) + 1
+            # Box Head
+            pred_boxes = self.model.box_head(image_embeds)
+            pred_boxes += self.box_bias
+            pred_boxes = torch.sigmoid(pred_boxes)
+            pred_boxes = _owl_center_to_corners_format_torch(pred_boxes)
+
+            # Class Head
+            image_class_embeds = self.model.class_head.dense0(image_embeds)
+            logit_shift = self.model.class_head.logit_shift(image_embeds)
+            logit_scale = self.model.class_head.logit_scale(image_embeds)
+            logit_scale = self.model.class_head.elu(logit_scale) + 1
+
+        if amp_enabled:
+            image_embeds = image_embeds.float()
+            image_class_embeds = image_class_embeds.float()
+            logit_shift = logit_shift.float()
+            logit_scale = logit_scale.float()
+            pred_boxes = pred_boxes.float()
 
         output = OwlEncodeImageOutput(
             image_embeds=image_embeds,
