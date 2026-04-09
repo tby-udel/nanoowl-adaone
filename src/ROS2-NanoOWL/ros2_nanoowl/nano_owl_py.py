@@ -31,9 +31,9 @@ class Nano_OWL_Subscriber(Node):
     def __init__(self):
         super().__init__('nano_owl_subscriber')
         
-        self.declare_parameter('model', 'google/owlvit-base-patch32')
+        self.declare_parameter('model', '/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf')
         self.declare_parameter('device', 'cuda')
-        self.declare_parameter('image_encoder_engine', '/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine')
+        self.declare_parameter('image_encoder_engine', '/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine')
         self.declare_parameter('thresholds', rclpy.Parameter.Type.DOUBLE)
         self.declare_parameter('publish_output_image', False)
         self.declare_parameter('publish_legacy_outputs', False)

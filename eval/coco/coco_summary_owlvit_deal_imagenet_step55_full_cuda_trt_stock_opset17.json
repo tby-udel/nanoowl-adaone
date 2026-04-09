@@ -1,0 +1,30 @@
+{
+  "model": "/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf",
+  "device": "cuda",
+  "backend": "cuda_trt",
+  "image_encoder_engine": "/workspaces/isaac_ros-dev/src/nanoowl/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine",
+  "annotations": "/datasets/coco2017/annotations/instances_val2017.json",
+  "image_dir": "/datasets/coco2017/val2017",
+  "prompt_template": "a photo of {label}",
+  "threshold": 0.1,
+  "pad_square": false,
+  "num_categories": 80,
+  "num_images": 5000,
+  "num_detections": 36274,
+  "total_seconds": 525.026320343,
+  "avg_seconds_per_image": 0.10500526406859999,
+  "stats": {
+    "AP": 0.25166444145266686,
+    "AP50": 0.39554750827613894,
+    "AP75": 0.2675779394468369,
+    "AP_small": 0.08935723080413091,
+    "AP_medium": 0.25897998302402997,
+    "AP_large": 0.43803907660524766,
+    "AR_max1": 0.24758254624683815,
+    "AR_max10": 0.3457909231579961,
+    "AR_max100": 0.3510099909759509,
+    "AR_small": 0.11870940089631578,
+    "AR_medium": 0.36146178688476815,
+    "AR_large": 0.595974872500899
+  }
+}

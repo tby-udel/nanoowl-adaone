@@ -26,11 +26,11 @@ def generate_launch_description():
             description='Threshold for filtering detections'),
         DeclareLaunchArgument(
             'image_encoder_engine',
-            default_value='/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owl_image_encoder_patch32.engine',
+            default_value='/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine',
             description='Path to the TensorRT engine for the OWL-ViT vision encoder'),
         DeclareLaunchArgument(
             'model',
-            default_value='google/owlvit-base-patch32',
+            default_value='/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf',
             description='Path to the Hugging Face OWL-ViT model directory'),
     ]
 
