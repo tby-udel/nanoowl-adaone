@@ -1,51 +1,128 @@
-# ROS2-NanoOWL Bring-Up Notes
+# ADAONE + NanoOWL End-To-End Instructions
 
-This file records the exact process that worked in `/home/ada2/boyang_ws` so the same custom-model setup can be repeated on another Jetson without rediscovering the same failure modes.
+This file is the practical end-to-end runbook for this machine and this workspace.
 
-## Environment That Worked
+It is intentionally code-heavy.
 
-- Host OS: Ubuntu 22.04 on Jetson Orin
-- ROS: Humble
-- Workspace root: `/home/ada2/boyang_ws`
-- Important source trees:
-  - `src/isaac_ros_common`
-  - `src/ROS2-NanoOWL`
-  - `src/nanoowl`
-  - `src/torch2trt`
-- Base container image: `isaac_ros_dev-aarch64:latest`
-- Saved working image: `isaac_ros_dev-aarch64:nanoowl-ready`
-- Active custom model directory: `/home/ada2/boyang_ws/my_model`
-- Active custom ROS engine path: `/home/ada2/boyang_ws/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
-- Active backup engine path: `/home/ada2/boyang_ws/src/nanoowl/data/my_model_image_encoder.engine`
+It covers:
 
-## Final Outcome
+- install and build assumptions
+- NanoOWL container setup
+- corrected TensorRT engine build
+- CARKit, sensor, and F1TENTH bring-up
+- proper low-level wheel-driver bring-up through `ada_system`
+- scene-aware indoor/outdoor testing
+- safe final launch of the vehicle-side stack plus NanoOWL
+- generated helper scripts to launch and stop everything
 
-The model swap is complete.
+## Safety First
 
-NanoOWL now uses our fine-tuned OWL-ViT checkpoint instead of the stock `google/owlvit-base-patch32` path.
+The launch flow below is a safe bring-up flow, not a full autonomous driving flow.
 
-Verified working pieces:
+What it does launch:
 
-- the custom Hugging Face model directory loads in the container
-- NanoOWL reads `image_size` and `patch_size` from the local `config.json`
-- `ros2_nanoowl` now defaults to the custom model and custom engine path
-- the custom TensorRT engine was successfully built on this Jetson after reboot
-- direct sample-image inference with the custom model and custom engine succeeded
-- the ROS node launched successfully with the custom model and custom engine
+- F1TENTH low-level stack
+- RealSense
+- LiDAR
+- LiDAR transformer
+- LiDAR localization
+- control center
+- depth-based object position
+- NanoOWL on GPU
 
-## Important Lessons
+What it does **not** launch:
 
-- `src/isaac_ros_common/scripts/run_dev.sh -d /home/ada2/boyang_ws` did not work here because `/home/ada2/boyang_ws` is not itself a Git repo.
-- The reliable workaround was to create or reuse the Isaac ROS container directly with `docker run`, host networking, and the normal Isaac ROS entrypoint.
-- The Isaac ROS image did not have a usable `torchvision` build for this Jetson and PyTorch combination, so `torchvision` had to be built from source inside the container.
-- NanoOWL ONNX export needed `attn_implementation="eager"` to avoid the OWL-ViT SDPA export failure.
-- The TensorRT engine build only became reliable after separating ONNX export from `trtexec`.
-- The custom engine did not build reliably while the Jetson was in a fragmented memory state. A reboot plus a lower-memory builder configuration was required.
-- TensorRT may still print OOM warnings while rejecting some tactics. That does not necessarily mean the final build failed. In the successful run here, TensorRT skipped some tactics and still completed engine generation.
+- pure pursuit
+- waypoint following
+- any explicit autonomous motion publisher
 
-## 1. Create Or Recreate The Isaac ROS Container
+Important note:
 
-If the saved working image already exists, reuse it. Otherwise start from `isaac_ros_dev-aarch64:latest`.
+- keep the joystick centered and do not enable autonomous control while testing
+- the goal here is bring-up and perception integration, not vehicle motion
+- when `control_center_node` is active, upstream drive-path tests should go through `/purepursuit_cmd`, not direct `/ackermann_cmd`
+- scene classification should not use shared or scene-neutral human labels to decide `indoor` vs `outdoor`
+
+## Known-Good Local Paths
+
+These instructions assume the following paths already exist on the machine:
+
+- NanoOWL workspace:
+  - `/home/ada2/boyang_ws`
+- CARKit workspace:
+  - `/home/ada2/CARKit`
+- sensor workspace:
+  - `/home/ada2/sensor_ws`
+- F1TENTH Foxy container workspace:
+  - `/home/ada2/ada_system`
+
+Important runtime assets:
+
+- fine-tuned model:
+  - `/home/ada2/boyang_ws/models/owlvit_deal_imagenet_step55_hf`
+- corrected fast TensorRT engine:
+  - `/home/ada2/boyang_ws/src/nanoowl/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine`
+- ROS-visible engine copy:
+  - `/home/ada2/boyang_ws/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine`
+
+## 1. Required Docker Images
+
+Verify or pull the images used by the current workflow:
+
+```bash
+docker pull ariiees/ada:foxy-f1tenth
+docker images | grep -E 'ariiees/ada|isaac_ros_dev-aarch64'
+```
+
+Known-good local images on this machine:
+
+- `ariiees/ada:foxy-f1tenth`
+- `isaac_ros_dev-aarch64:latest`
+- `isaac_ros_dev-aarch64:nanoowl-ready`
+
+## 2. Build The Host ROS Workspaces
+
+### 2.1 Build `sensor_ws`
+
+This workspace provides:
+
+- `realsense2_camera`
+- `sllidar_ros2`
+
+```bash
+cd /home/ada2/sensor_ws
+source /opt/ros/humble/setup.bash
+colcon build --symlink-install
+```
+
+### 2.2 Build `CARKit`
+
+This workspace provides:
+
+- `ada`
+- `control_center`
+- `util`
+- `lidar_localization_ros2`
+
+```bash
+cd /home/ada2/CARKit
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+colcon build --symlink-install
+```
+
+Quick check:
+
+```bash
+test -f /home/ada2/CARKit/install/setup.bash && echo CARKIT_OK
+test -f /home/ada2/sensor_ws/install/setup.bash && echo SENSOR_WS_OK
+```
+
+## 3. Create Or Reuse The Isaac ROS NanoOWL Container
+
+If the working container already exists, reuse it.
+
+Create it if needed:
 
 ```bash
 docker run -d \
@@ -66,11 +143,17 @@ docker run -d \
   -v /usr/src/jetson_multimedia_api:/usr/src/jetson_multimedia_api:ro \
   -v /usr/share/vpi3:/usr/share/vpi3:ro \
   --entrypoint /usr/local/bin/scripts/workspace-entrypoint.sh \
-  isaac_ros_dev-aarch64:latest \
+  isaac_ros_dev-aarch64:nanoowl-ready \
   /bin/bash -lc 'trap : TERM INT; sleep infinity & wait'
 ```
 
-Verify the workspace mount:
+Start it:
+
+```bash
+docker start isaac_ros_dev-aarch64-container
+```
+
+Verify:
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc 'printenv ISAAC_ROS_WS'
@@ -82,9 +165,23 @@ Expected:
 /workspaces/isaac_ros-dev
 ```
 
-## 2. Build A Working `torchvision` Inside The Container
+## 4. Install NanoOWL Python Dependencies Inside The Container
 
-Inside this Isaac ROS image, the bundled `torchvision` was not usable with the Jetson PyTorch build. The working fix was a source build copied into the user site-packages directory.
+If this is a fresh container and not the prepared `nanoowl-ready` image, run:
+
+```bash
+docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
+set -e
+python3 -m pip install --user transformers pycocotools
+cd /workspaces/isaac_ros-dev/src/torch2trt
+python3 -m pip install --user --no-build-isolation .
+cd /workspaces/isaac_ros-dev/src/nanoowl
+python3 -m pip install --user --no-build-isolation .
+python3 -c "import torch, torchvision, tensorrt; from nanoowl.owl_predictor import OwlPredictor; print(\"imports_ok\")"
+'
+```
+
+If `torchvision` is broken in the container, rebuild it from source:
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -100,122 +197,9 @@ python3 -c "import torchvision; from torchvision.ops import roi_align; print(tor
 '
 ```
 
-Why this exact flow:
+## 5. Build NanoOWL And `ros2_nanoowl`
 
-- a regular pip wheel import worked only partially and failed at runtime because compiled ops were missing
-- copying the source-built package tree worked immediately and was enough for NanoOWL
-
-## 3. Install Python Dependencies Inside The Container
-
-Clean stale build artifacts first if earlier attempts left the wrong ownership behind:
-
-```bash
-docker exec -u root isaac_ros_dev-aarch64-container bash -lc '
-chown -R 1000:1000 /home/admin/.local /workspaces/isaac_ros-dev/src/torch2trt /workspaces/isaac_ros-dev/src/nanoowl
-rm -rf /workspaces/isaac_ros-dev/src/torch2trt/build
-rm -rf /workspaces/isaac_ros-dev/src/torch2trt/torch2trt.egg-info
-rm -rf /workspaces/isaac_ros-dev/src/nanoowl/build
-rm -rf /workspaces/isaac_ros-dev/src/nanoowl/nanoowl.egg-info
-'
-```
-
-Then install the missing Python dependencies:
-
-```bash
-docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
-set -e
-python3 -m pip install --user transformers
-cd /workspaces/isaac_ros-dev/src/torch2trt
-python3 -m pip install --user --no-build-isolation .
-cd /workspaces/isaac_ros-dev/src/nanoowl
-python3 -m pip install --user --no-build-isolation .
-python3 -c "import torch, torchvision, tensorrt; from nanoowl.owl_predictor import OwlPredictor; print(\"imports_ok\")"
-'
-```
-
-## 4. Upload The Fine-Tuned Model Folder
-
-The custom model is stored directly in the workspace root:
-
-- `/home/ada2/boyang_ws/my_model`
-
-Files currently present:
-
-- `config.json`
-- `model.safetensors`
-- `processor_config.json`
-- `tokenizer.json`
-- `tokenizer_config.json`
-
-Do not split these files. The model directory must remain intact so Hugging Face can load it as a local checkpoint.
-
-Quick check:
-
-```bash
-ls -lh /home/ada2/boyang_ws/my_model
-```
-
-## 5. Patch NanoOWL To Accept A Local Hugging Face Directory
-
-These edits are already present in this workspace.
-
-### File: `src/nanoowl/nanoowl/owl_predictor.py`
-
-Implemented changes:
-
-- import `json`
-- if `model_name` is a local directory, read `vision_config.image_size` from `config.json`
-- if `model_name` is a local directory, read `vision_config.patch_size` from `config.json`
-- keep the stock hardcoded table for official Google model names
-- load the processor with `use_fast=False`
-- keep the earlier Jetson-specific TensorRT fixes:
-  - eager attention for OWL-ViT load
-  - lazy TensorRT execution context creation
-  - keep the full Hugging Face model on CPU when TensorRT image encoding is used
-  - move only the needed text embeddings to the image device during decode
-
-Why:
-
-- local model directories do not match the original string-based lookup logic
-- `use_fast=False` reduces the chance of tokenization differences relative to training-time preprocessing
-- the earlier CPU/GPU split is still required to keep the Jetson GPU path stable
-
-### File: `src/ROS2-NanoOWL/ros2_nanoowl/nano_owl_py.py`
-
-Implemented changes:
-
-- default model parameter now points to `/workspaces/isaac_ros-dev/my_model`
-- default engine parameter now points to `/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
-- if the engine path is missing, log a warning and fall back to direct model inference
-- preserve earlier performance fixes:
-  - `device` parameter
-  - queue depth `1`
-  - frame dropping while busy
-  - cached text encodings
-  - optional `publish_output_image`
-
-Why:
-
-- the ROS node now uses the custom model and engine by default
-- the fallback avoids a hard crash if the engine file is temporarily missing during rebuilds
-
-### File: `src/ROS2-NanoOWL/launch/nano_owl_example.launch.py`
-
-Implemented changes:
-
-- default `model` launch argument now points to `/workspaces/isaac_ros-dev/my_model`
-- default `image_encoder_engine` launch argument now points to `/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
-
-### File: `src/ROS2-NanoOWL/launch/camera_input_example.launch.py`
-
-Implemented changes:
-
-- same default custom model path
-- same default custom engine path
-
-## 6. Reinstall NanoOWL And Rebuild The ROS Package
-
-After changing the code, reinstall the Python package:
+Reinstall the Python package and rebuild the ROS package:
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
@@ -223,316 +207,504 @@ set -e
 source /opt/ros/humble/setup.bash
 cd /workspaces/isaac_ros-dev/src/nanoowl
 python3 -m pip install --user --no-build-isolation .
-'
-```
-
-Then rebuild `ros2_nanoowl`:
-
-```bash
-docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
-set -e
-source /opt/ros/humble/setup.bash
 cd /workspaces/isaac_ros-dev
 colcon build --symlink-install --packages-select ros2_nanoowl
 '
 ```
 
-## 7. Validate The Local Model Before Building TensorRT
+## 6. Build The Corrected Fast Fine-Tuned TensorRT Engine
 
-This checks that the custom directory loads correctly even before the engine exists:
+This is the current recommended engine build path.
 
-```bash
-docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
-set -e
-source /opt/ros/humble/setup.bash
-cd /workspaces/isaac_ros-dev/src/nanoowl
-python3 - <<'"'"'PY'"'"'
-from nanoowl.owl_predictor import OwlPredictor
-predictor = OwlPredictor(model_name="/workspaces/isaac_ros-dev/my_model", device="cpu")
-print("image_size", predictor.image_size)
-print("patch_size", predictor.patch_size)
-print("processor_ok")
-PY
-'
-```
+It uses:
 
-Known good result from this workspace:
-
-- `image_size 768`
-- `patch_size 32`
-- `processor_ok`
-
-## 8. Validate The Custom Model With A CPU Smoke Test
-
-This uses the bundled sample image only to confirm the model path and NanoOWL pipeline work end to end.
-
-```bash
-docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
-set -e
-source /opt/ros/humble/setup.bash
-source /workspaces/isaac_ros-dev/install/setup.bash
-python3 - <<'"'"'PY'"'"'
-from nanoowl.owl_predictor import OwlPredictor
-from PIL import Image
-predictor = OwlPredictor(model_name="/workspaces/isaac_ros-dev/my_model", device="cpu")
-img = Image.open("/workspaces/isaac_ros-dev/src/nanoowl/assets/owl_glove_small.jpg").convert("RGB")
-text = ["an owl", "a glove"]
-enc = predictor.encode_text(text)
-out = predictor.predict(image=img, text=text, text_encodings=enc, threshold=[0.05, 0.05], pad_square=False)
-print("labels", out.labels.tolist())
-print("num_boxes", len(out.boxes))
-PY
-'
-```
-
-Known good result:
-
-- `labels [0, 1]`
-- `num_boxes 2`
-
-## 9. Why The First Custom TensorRT Builds Failed
-
-The failure was not a model-format problem. ONNX export worked every time.
-
-The real problem was Jetson GPU memory pressure during TensorRT tactic selection.
-
-Observed failure pattern:
-
-- `trtexec` parsed the ONNX model correctly
-- TensorRT started tactic search
-- one or more tactics requested an additional `~174 MB` or `~348 MB`
-- the allocator failed
-- TensorRT eventually reported:
-  - `Could not find any implementation for node {ForeignNode[/vision_model/embeddings/.../Concat]}`
-
-Important detail:
-
-- that final graph error was downstream of tactic exhaustion
-- it did not mean the ONNX graph itself was invalid
-
-What did not solve it by itself:
-
-- using the same exact build method that worked earlier for the stock model
-- lowering `builderOptimizationLevel` alone
-- setting `maxAuxStreams=0` alone
-- trimming tactic sources alone
-- using opset `17` alone
-
-## 10. What Finally Made The Custom Engine Build Work
-
-The successful engine build needed all of the following together:
-
-1. reboot the Jetson first
-2. do not launch RealSense, RViz, NanoOWL, or other GPU-heavy tasks before the build
-3. export ONNX with opset `17`
-4. use a low-memory TensorRT builder configuration
-5. save a timing cache file for future rebuilds
-
-Successful command:
+- the fine-tuned checkpoint
+- a stock-style TensorRT builder path
+- ONNX opset `17`
 
 ```bash
 docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
 set -e
 source /opt/ros/humble/setup.bash
 cd /workspaces/isaac_ros-dev/src/nanoowl
-rm -f data/my_model_image_encoder_opset17.onnx data/my_model_image_encoder.engine data/patch32_orin.timing
+rm -f data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.onnx
+rm -f data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine
 python3 - <<'"'"'PY'"'"'
 from nanoowl.owl_predictor import OwlPredictor
-predictor = OwlPredictor(model_name="/workspaces/isaac_ros-dev/my_model", device="cpu")
-predictor.export_image_encoder_onnx("data/my_model_image_encoder_opset17.onnx", onnx_opset=17)
+predictor = OwlPredictor(
+    model_name="/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf",
+    device="cpu",
+)
+predictor.export_image_encoder_onnx(
+    "data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.onnx",
+    onnx_opset=17,
+)
 print("onnx17_export_ok")
 PY
 /usr/src/tensorrt/bin/trtexec \
-  --onnx=data/my_model_image_encoder_opset17.onnx \
-  --saveEngine=data/my_model_image_encoder.engine \
+  --onnx=data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.onnx \
+  --saveEngine=data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine \
   --fp16 \
-  --shapes=image:1x3x768x768 \
-  --builderOptimizationLevel=0 \
-  --maxAuxStreams=0 \
-  --tacticSources=-CUDNN,-EDGE_MASK_CONVOLUTIONS,-JIT_CONVOLUTIONS \
-  --timingCacheFile=data/patch32_orin.timing \
-  --skipInference
-cp -f data/my_model_image_encoder.engine /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine
-ls -lh data/my_model_image_encoder.engine /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine data/patch32_orin.timing
+  --shapes=image:1x3x768x768
+cp -f data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine \
+  /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine
+ls -lh \
+  data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine \
+  /workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine
 '
 ```
 
-Why this worked:
+## 7. Current NanoOWL Default Runtime
 
-- opset `17` produced a cleaner export for TensorRT
-- `builderOptimizationLevel=0` reduced builder search pressure
-- `maxAuxStreams=0` reduced memory overhead
-- removing `CUDNN`, `EDGE_MASK_CONVOLUTIONS`, and `JIT_CONVOLUTIONS` reduced the tactic pool
-- `--skipInference` avoided the post-build benchmark pass
-- the reboot gave TensorRT a cleaner memory state to start from
+The current source defaults are already set to:
 
-Successful build output from this workspace:
+- model:
+  - `/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf`
+- engine:
+  - `/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine`
 
-- TensorRT still reported some OOM warnings while rejecting high-memory tactics
-- despite those warnings, TensorRT continued and found a valid implementation set
-- engine generation completed in about `41.5 seconds`
-- engine size was about `173 MiB`
-- timing cache size was about `351 KiB`
+The most important ROS runtime flags for ADAONE integration are:
 
-Final files created:
+- `device:=cuda`
+- `publish_output_image:=false`
+- `publish_legacy_outputs:=true`
+- remap input image to:
+  - `/camera/camera/color/image_raw`
 
-- `/home/ada2/boyang_ws/src/nanoowl/data/my_model_image_encoder.engine`
-- `/home/ada2/boyang_ws/src/ROS2-NanoOWL/data/my_model_image_encoder.engine`
-- `/home/ada2/boyang_ws/src/nanoowl/data/patch32_orin.timing`
+That last flag matters because `publish_legacy_outputs:=true` is what lets NanoOWL feed the existing ADAONE `/yolo/detections` consumer path.
 
-## 11. Validate The Custom Engine
+## 8. Manual Safe Launch By Hand
 
-After the engine is built, verify that NanoOWL can use it:
+This is the manual version of the full safe bring-up.
+
+### 8.1 Start The Isaac ROS Container
 
 ```bash
-docker exec -u admin isaac_ros_dev-aarch64-container bash -lc '
-set -e
-source /opt/ros/humble/setup.bash
-source /workspaces/isaac_ros-dev/install/setup.bash
-python3 - <<'"'"'PY'"'"'
-from nanoowl.owl_predictor import OwlPredictor
-from PIL import Image
-predictor = OwlPredictor(
-    model_name="/workspaces/isaac_ros-dev/my_model",
-    device="cuda",
-    image_encoder_engine="/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine",
-)
-img = Image.open("/workspaces/isaac_ros-dev/src/nanoowl/assets/owl_glove_small.jpg").convert("RGB")
-text = ["an owl", "a glove"]
-enc = predictor.encode_text(text)
-out = predictor.predict(image=img, text=text, text_encodings=enc, threshold=[0.05, 0.05], pad_square=False)
-print("labels", out.labels.tolist())
-print("num_boxes", len(out.boxes))
-PY
-'
+docker start isaac_ros_dev-aarch64-container
 ```
 
-Known good result:
+### 8.2 Terminal 1: Start The F1TENTH Foxy Container The Proper Way
 
-- `labels [0, 1]`
-- `num_boxes 2`
+```bash
+cd /home/ada2/ada_system
+./run_container.sh
+```
 
-## 12. Launch The ROS Node With The Custom Model And Engine
+Important note:
 
-The ROS node can now be launched directly with the custom assets:
+- this is the workflow that finally produced real wheel motion on this machine
+- the lower-chassis stack should be launched from the interactive `ada_system` container, not from a stale partial setup
+
+### 8.3 Inside The `ada_system` Container: F1TENTH Bring-Up
+
+```bash
+source install_foxy/setup.bash
+ros2 launch f1tenth_stack bringup_launch.py
+```
+
+Important note:
+
+- `install/setup.bash` was stale for the low-level stack on this machine
+- `install_foxy/setup.bash` is the correct environment for `f1tenth_stack`, `vesc_driver`, and `vesc_ackermann`
+- the working VESC config on this machine used `/dev/ttyACM0`
+
+### 8.4 Terminal 2: LiDAR
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 launch sllidar_ros2 sllidar_s2_launch.py
+```
+
+### 8.5 Terminal 3: RealSense Low-Load Profile
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 launch realsense2_camera rs_launch.py \
+  enable_color:=true \
+  enable_depth:=true \
+  enable_rgbd:=true \
+  align_depth.enable:=true \
+  enable_sync:=true \
+  enable_gyro:=false \
+  enable_accel:=false \
+  enable_infra1:=false \
+  enable_infra2:=false \
+  rgb_camera.color_profile:=640,480,15 \
+  depth_module.depth_profile:=640,480,15
+```
+
+### 8.6 Terminal 4: LiDAR Transformer
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 run util lidar_transformer_node
+```
+
+### 8.7 Terminal 5: LiDAR Localization
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 launch lidar_localization_ros2 lidar_localization.launch.py
+```
+
+### 8.8 Terminal 6: Control Center
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 run control_center control_center_node
+```
+
+### 8.9 Terminal 7: Object Position
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 run ada object_position --ros-args -p target_object_type:=chair
+```
+
+### 8.10 Terminal 8: NanoOWL On GPU
 
 ```bash
 docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
-source /opt/ros/humble/setup.bash &&
-source /workspaces/isaac_ros-dev/install/setup.bash &&
-export RMW_IMPLEMENTATION=rmw_fastrtps_cpp ROS_LOCALHOST_ONLY=0 &&
+source /opt/ros/humble/setup.bash
+source /workspaces/isaac_ros-dev/install/setup.bash
+export PYTHONPATH=/workspaces/isaac_ros-dev/src/nanoowl:$PYTHONPATH
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
 ros2 run ros2_nanoowl nano_owl_py --ros-args \
   -r input_image:=/camera/camera/color/image_raw \
-  -p model:=/workspaces/isaac_ros-dev/my_model \
+  -p model:=/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf \
   -p device:=cuda \
-  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/my_model_image_encoder.engine \
+  -p image_encoder_engine:=/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine \
   -p thresholds:=0.05 \
-  -p publish_output_image:=true
+  -p publish_output_image:=false \
+  -p publish_legacy_outputs:=true
 '
 ```
 
-Known good ROS graph result:
+### 8.11 Terminal 9: Publish A Query
 
-- `/nano_owl_subscriber` appeared in `ros2 node list`
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 topic pub -1 /input_query std_msgs/msg/String "data: a chair, a person, a monitor, a bottle, a cup, a stop sign"
+```
 
-## 13. RealSense Host Bring-Up
+### 8.12 Indoor / Outdoor Scene Classification Test Only
 
-The RealSense node must run on the host, not inside the container.
+This is the lightest recordable scene-selection test. It does not require changing the control logic.
 
-Use these host settings:
+Important note:
+
+- on this Jetson, the most reliable validation path used a warmed-up baseline NanoOWL node on CPU inference
+- the fine-tuned TensorRT path is still the recommended deployment target overall, but it was not the most stable path for the scene-classification test under a loaded ADAONE stack
+
+Terminal A, start a perception-only NanoOWL node:
+
+```bash
+docker start isaac_ros_dev-aarch64-container
+docker exec -it -u admin isaac_ros_dev-aarch64-container bash -lc '
+source /opt/ros/humble/setup.bash
+source /workspaces/isaac_ros-dev/install/setup.bash
+export PYTHONPATH=/workspaces/isaac_ros-dev/src/nanoowl:$PYTHONPATH
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 run ros2_nanoowl nano_owl_py --ros-args \
+  -r input_image:=/camera/camera/color/image_raw \
+  -p model:=google/owlvit-base-patch32 \
+  -p device:=cpu \
+  -p thresholds:=0.05 \
+  -p publish_output_image:=false \
+  -p publish_legacy_outputs:=true \
+  -p legacy_detection_topic:=/yolo/detections \
+  -p legacy_image_topic:=/yolo/inference_image
+'
+```
+
+Terminal B, run the scene-aware query manager:
+
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 run ada scene_aware_query_manager --ros-args \
+  -p startup_delay_sec:=1.0 \
+  -p probe_duration_sec:=8.0 \
+  -p probe_publish_period_sec:=1.0 \
+  -p min_score_margin:=0.10
+```
+
+Terminal C, watch the result:
 
 ```bash
 source /opt/ros/humble/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_LOCALHOST_ONLY=0
-ros2 run realsense2_camera realsense2_camera_node --ros-args -p enable_depth:=false -p enable_infra1:=false -p enable_infra2:=false -p enable_gyro:=false -p enable_accel:=false
+ros2 topic echo /scene_mode
 ```
 
-Then publish a prompt from the host:
+Optional visibility:
+
+```bash
+ros2 topic echo /yolo/detections
+ros2 topic echo /input_query
+```
+
+Latest confirmed result on this machine:
+
+- scene mode locked to `indoor`
+- the scored decision was `indoor=2.28 (13 hits), outdoor=0.00 (0 hits)`
+- the indoor vote was driven by detections like `bottle`, `chair`, and `box`
+
+Classification rule:
+
+- labels shared by both probe lists are ignored
+- scene-neutral human-family labels are also ignored for scoring:
+  - `person`
+  - `people`
+  - `pedestrian`
+  - `pedestrians`
+  - `human`
+  - `humans`
+
+## 9. One-Command Safe Launcher
+
+Generated scripts:
+
+- `scripts/launch_adaone_nanoowl_safe.sh`
+- `scripts/stop_adaone_nanoowl_safe.sh`
+
+Default behavior of the launcher:
+
+- starts the F1TENTH container in detached mode
+- starts the Isaac ROS NanoOWL container
+- launches the safe host stack in the background
+- launches NanoOWL on GPU
+- publishes a default query once
+- stores logs under:
+  - `/home/ada2/boyang_ws/runtime/adaone_nanoowl/latest`
+
+### 9.1 Launch Everything
+
+```bash
+cd /home/ada2/boyang_ws
+./scripts/launch_adaone_nanoowl_safe.sh
+```
+
+### 9.2 Launch With A Custom Query And Target Object
+
+```bash
+cd /home/ada2/boyang_ws
+./scripts/launch_adaone_nanoowl_safe.sh \
+  --target-object-type chair \
+  --query "a chair, a person, a monitor, a bottle, a cup, a stop sign"
+```
+
+### 9.3 Optional Flags
+
+```bash
+./scripts/launch_adaone_nanoowl_safe.sh --help
+```
+
+Supported options:
+
+- `--target-object-type <label>`
+- `--query "<comma separated prompt list>"`
+- `--threshold <float>`
+- `--publish-output-image`
+- `--no-lidar-localization`
+
+## 10. Verification Commands
+
+### 10.1 ROS Graph
 
 ```bash
 source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
 export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
 export ROS_LOCALHOST_ONLY=0
-ros2 topic pub -1 /input_query std_msgs/msg/String "data: a person, a monitor, a chair"
+ros2 node list
 ```
 
-Important model note:
+Expected important nodes:
 
-- the model now answers according to the custom fine-tuned checkpoint, not the stock OWL-ViT behavior
-- prompt quality depends on what labels or concepts the model was fine-tuned on
+- `/camera/camera`
+- `/nano_owl_subscriber`
+- `/object_position_node`
+- `/control_center_node`
+- `/lidar_transformer_node`
+- `/lidar_localization`
 
-## 14. Why Building On A Stronger Non-Jetson Machine Is Not The Preferred Path
-
-TensorRT engines are not generally portable across platforms, and JetPack does not support the TensorRT hardware-compatibility mode used for broader engine portability.
-
-Practical consequence:
-
-- a non-Jetson x86 workstation is not the safe place to build the final deployment engine for this Jetson
-- the preferred path is to build on the target Jetson or a closely matching Jetson with the same JetPack and TensorRT stack
-
-## 15. Troubleshooting
-
-### `run_dev.sh` fails immediately
-
-- Cause: the workspace root is not a Git repo.
-- Fix: use the direct `docker run` command from section 1.
-
-### `torchvision` imports but ops are missing
-
-- Cause: incompatible prebuilt wheel.
-- Fix: rebuild from source and copy the built package tree into `/home/admin/.local/lib/python3.10/site-packages`.
-
-### Local model path fails in `OwlPredictor`
-
-- Cause: `image_size` and `patch_size` were originally hardcoded by model name string.
-- Fix: keep the local-directory `config.json` patch in `owl_predictor.py`.
-
-### Engine build fails with GPU OOM
-
-- Cause: TensorRT tactic search exceeds what the Jetson can allocate in its current memory state.
-- Fix:
-  - reboot first
-  - do not launch camera or RViz before the build
-  - use the exact successful command from section 10
-  - keep the timing cache file for future rebuilds
-
-### GPU direct inference without TensorRT fails
-
-- Cause: the Jetson can still hit allocator failures when trying to run the full direct GPU model path without the engine.
-- Fix: use the custom TensorRT engine path for deployment.
-
-### ROS node starts but the engine file is missing
-
-- Current behavior: the node warns and falls back to direct model inference.
-- Recommended fix: rebuild or restore `my_model_image_encoder.engine`.
-
-### `class_id` values in `/output_detections` are numbers
-
-- They are indexes into the query list in order.
-- Example:
-  - `0` means the first phrase in the query string.
-  - `1` means the second phrase.
-  - `2` means the third phrase.
-
-## 16. Save The Working Container State
-
-After the setup worked, the container could be committed again if desired:
+### 10.2 NanoOWL Detections
 
 ```bash
-docker commit isaac_ros_dev-aarch64-container isaac_ros_dev-aarch64:nanoowl-ready
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 topic hz /output_detections
 ```
 
-Do this only if you want the current Python environment and rebuilt packages preserved in the image itself.
+### 10.3 ADAONE-Compatible Detection Stream
 
-## 17. Git Note
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 topic echo /yolo/detections --once
+```
 
-The custom model and engine binaries are large:
+### 10.4 Depth-Based Object Position
 
-- `my_model/model.safetensors` is about `585 MiB`
-- `my_model_image_encoder.engine` is about `174 MiB`
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 topic echo /object_position --once
+```
 
-Do not commit these binaries to a normal GitHub repository unless you intentionally use Git LFS. The normal path is:
+### 10.5 Confirm Safe Stop-State Command
 
-- keep the model folder locally on the edge device
-- rebuild the engine locally when needed
+```bash
+source /opt/ros/humble/setup.bash
+source /home/ada2/sensor_ws/install/setup.bash
+source /home/ada2/CARKit/install/setup.bash
+export RMW_IMPLEMENTATION=rmw_fastrtps_cpp
+export ROS_LOCALHOST_ONLY=0
+ros2 topic echo /ackermann_cmd --once
+```
+
+Expected safe behavior:
+
+- no pure pursuit node is active
+- no autonomy enable command is sent
+- `speed` should stay at `0.0` in the idle safe bring-up
+
+## 11. Stop Everything
+
+Stop with the generated helper:
+
+```bash
+cd /home/ada2/boyang_ws
+./scripts/stop_adaone_nanoowl_safe.sh
+```
+
+## 12. Troubleshooting
+
+### NanoOWL Falls Back To CPU
+
+Check:
+
+```bash
+ls -lh /home/ada2/boyang_ws/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine
+```
+
+If the engine is missing, rebuild it using section `6`.
+
+### LiDAR Does Not Start
+
+Retry permission fix:
+
+```bash
+docker exec f1tenth_container chmod 777 /dev/ttyUSB0 >/dev/null 2>&1 || true
+docker exec f1tenth_container chmod 777 /dev/ttyACM0 >/dev/null 2>&1 || true
+```
+
+If the wheel driver is the actual problem rather than LiDAR:
+
+- verify the low-level stack was launched from `/home/ada2/ada_system/run_container.sh`
+- verify `source install_foxy/setup.bash` was used inside the container
+- verify the active VESC serial path is correct for the current machine state
+- on this ADAONE, the successful wheel-motion test used `/dev/ttyACM0`
+
+### NanoOWL Starts But No ADAONE Detections Flow
+
+Check:
+
+```bash
+ros2 topic echo /yolo/detections --once
+ros2 topic echo /output_detections --once
+```
+
+If `/output_detections` exists but `/yolo/detections` is empty, make sure NanoOWL was launched with:
+
+- `-p publish_legacy_outputs:=true`
+
+If the scene selector falls back with zero scores:
+
+- let NanoOWL warm up first
+- rerun `scene_aware_query_manager` after NanoOWL is already alive
+- use the lighter baseline CPU path for the scene test if the TensorRT/GPU path is unstable on the loaded stack
+
+### RealSense Is Too Heavy
+
+Keep the reduced profile:
+
+- `rgb_camera.color_profile:=640,480,15`
+- `depth_module.depth_profile:=640,480,15`
+
+### The Whole Stack Feels Slow
+
+Keep these settings:
+
+- `device:=cuda`
+- TensorRT engine enabled
+- `publish_output_image:=false`
+
+## 13. Current Bottom Line
+
+The current known-good deployment on this machine is:
+
+- fine-tuned model:
+  - `/workspaces/isaac_ros-dev/models/owlvit_deal_imagenet_step55_hf`
+- corrected fast TensorRT engine:
+  - `/workspaces/isaac_ros-dev/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine`
+- safe integrated stack:
+  - F1TENTH bring-up
+  - LiDAR
+  - RealSense
+  - LiDAR localization
+  - control center
+  - object position
+  - NanoOWL on GPU
+- scene-aware indoor/outdoor demo:
+  - camera input
+  - NanoOWL legacy detections
+  - `scene_aware_query_manager`
+  - shared labels and human-family labels excluded from scene scoring
+
+This is the current recommended way to launch ADAONE together with the NanoOWL perception module on this Jetson.

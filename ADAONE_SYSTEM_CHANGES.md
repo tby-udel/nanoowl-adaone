@@ -270,8 +270,28 @@ Important nuance:
 
 - the first test failed because the scene probe started before NanoOWL had warmed up enough to emit detections
 - rerunning the scene manager against an already-running NanoOWL node produced the correct detection-driven `indoor` decision
+- a later logic hardening step excluded both shared labels and scene-neutral human-family labels from scene scoring
 
-### 4.3 GPU / TensorRT Stability
+### 4.3 Drive-Command Path Finding
+
+The low-level driver was not enough by itself to make wheel-control tests easy to interpret.
+
+Important findings:
+
+- when `control_center_node` is active, direct `/ackermann_cmd` testing can be misleading
+- host-side zero-speed publishers can override or compete with direct command injection
+- upstream testing should go through `/purepursuit_cmd` when the full ADAONE control path is active
+
+Reason:
+
+- that path matches the active host-side arbitration logic more closely
+- it made it possible to verify the whole command chain cleanly:
+  - `/purepursuit_cmd`
+  - `/ackermann_cmd`
+  - `/commands/motor/speed`
+  - `/sensors/core`
+
+### 4.4 GPU / TensorRT Stability
 
 Under heavier full-stack conditions, the TensorRT/GPU path was not consistently stable for the indoor/outdoor classification test.
 

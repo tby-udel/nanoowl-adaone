@@ -2,20 +2,34 @@
 
 ## Current Status
 
-This handoff is no longer a proposal. The custom-model swap has been implemented in the current workspace.
+This handoff is now partly historical.
+
+It records the original local-model integration work, but it is no longer the best source of truth for the *current* default deployment.
+
+Current source-of-truth docs are:
+
+- [README.md](/home/ada2/boyang_ws/README.md)
+- [instructions.md](/home/ada2/boyang_ws/instructions.md)
+- [manual.md](/home/ada2/boyang_ws/manual.md)
+- [ADAONE_SYSTEM_CHANGES.md](/home/ada2/boyang_ws/ADAONE_SYSTEM_CHANGES.md)
+
+This handoff still matters because it explains how local-model support was added and why engine rebuilds were necessary.
 
 Current state:
 
 - NanoOWL no longer depends on the stock `google/owlvit-base-patch32` path for normal operation.
-- The workspace now uses the uploaded local Hugging Face model directory at `/home/ada2/boyang_ws/my_model`.
-- A matching TensorRT image encoder engine has been built successfully on this Jetson.
-- The ROS node has been launched with the custom model and the custom engine.
+- The earlier local-model path at `/home/ada2/boyang_ws/my_model` was successfully integrated and validated.
+- That work enabled the later migration to the current default fine-tuned model path:
+  - `/home/ada2/boyang_ws/models/owlvit_deal_imagenet_step55_hf`
+- A matching TensorRT image encoder engine was built successfully on this Jetson.
+- The current recommended engine is no longer the old `my_model_image_encoder.engine`; it is the corrected stock-style fine-tuned engine:
+  - `/home/ada2/boyang_ws/src/ROS2-NanoOWL/data/owlvit_deal_imagenet_step55_hf_image_encoder_stock_opset17.engine`
 
-## Final Goal
+## Historical Goal
 
 Replace NanoOWL's default `google/owlvit-base-patch32` with our fine-tuned OWL-ViT model while keeping the rest of the NanoOWL and ROS 2 pipeline as unchanged as possible.
 
-That goal is now achieved in this workspace.
+That original goal was achieved in this workspace and later generalized into the current fine-tuned deployment path.
 
 ## Custom Model Folder In This Workspace
 
